@@ -1,0 +1,6 @@
+feat: Add full project structure and core application logic
+
+- Restructure project into modular components (core, engine, utils)
+- Add core autoscaling and anomaly detection logic
+- Integrate LSTM, BiLSTM, and Prophet model results
+- Add data, notebooks, and main application files

@@ -33,5 +33,5 @@ ANOMALY_DROP_THRESHOLD = 30
 
 # --- Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), "data", "processed")
-MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "data", "models")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MODEL_DIR = os.path.join(BASE_DIR, "models")  # Fix: models/ not data/models/

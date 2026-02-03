@@ -18,18 +18,13 @@ class ModelLoader:
             return None
             
         try:
-            from tensorflow.keras.models import load_model
-            return load_model(path)
-        except (ImportError, OSError):
-            # Fallback for Mock models (pickled)
-            try:
-                with open(path, 'rb') as f:
-                    return pickle.load(f)
-            except Exception as e2:
-                self.logger.error(f"Error loading model {model_name}: {e2}")
-                return None
+            import tensorflow as tf
+            model = tf.keras.models.load_model(path)
+            self.logger.info(f"✅ Loaded Keras model from {path}")
+            return model
         except Exception as e:
-            self.logger.error(f"Error loading model: {e}")
+            self.logger.error(f"❌ Error loading Keras model {model_name}: {e}")
+            return None
             return None
 
     def load_scaler(self, scaler_name: str):

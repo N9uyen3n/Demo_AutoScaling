@@ -132,6 +132,7 @@ h1, h2, h3 {
 # ──────────────────────────────────────────────
 # 2.  HELPER FUNCTIONS
 # ──────────────────────────────────────────────
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_hybrid_data(resolution: str) -> pd.DataFrame:
     """Loads pre-calculated predictions."""
     res_map = {'1m': '1min_request_count', '5m': '5min_request_count', '15m': '15min_request_count'}
@@ -153,6 +154,7 @@ def load_hybrid_data(resolution: str) -> pd.DataFrame:
                 continue
     return None
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_prophet_data(resolution: str) -> pd.DataFrame:
     """Loads pre-calculated Prophet predictions."""
     res_map = {'1m': '1min_request_count', '5m': '5min_request_count', '15m': '15min_request_count'}
@@ -174,6 +176,7 @@ def load_prophet_data(resolution: str) -> pd.DataFrame:
                 continue
     return None
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_raw_data(resolution: str) -> pd.DataFrame:
     """Loads raw test data."""
     filename = f"test_{resolution.replace('m', 'min')}.csv"
@@ -193,6 +196,96 @@ def load_raw_data(resolution: str) -> pd.DataFrame:
             except Exception:
                 continue
     return None
+
+@st.cache_data(ttl=3600)
+def load_train_data(resolution: str, last_n: int = 30) -> pd.DataFrame:
+    """Loads last N points from train data for warm-start."""
+    filename = f"train_{resolution.replace('m', 'min')}.csv"
+    path = os.path.join("data", filename)
+    possible_roots = ["", "../", "../../"]
+    
+    for root in possible_roots:
+        full_path = os.path.join(root, path)
+        if os.path.exists(full_path):
+            try:
+                df = pd.read_csv(full_path)
+                if 'timestamp' not in df.columns:
+                    df.rename(columns={df.columns[0]: 'timestamp'}, inplace=True)
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                if 'request_count' in df.columns:
+                    df.rename(columns={'request_count': 'requests'}, inplace=True)
+                return df.tail(last_n).reset_index(drop=True)
+            except Exception:
+                continue
+    return None
+
+@st.cache_data(ttl=3600)
+def load_model_predictions(model_name: str, resolution: str) -> pd.DataFrame:
+    """Loads pre-calculated predictions for any model (LSTM/ARIMA/Prophet)."""
+    res_map = {'1m': '1min_request_count', '5m': '5min_request_count', '15m': '15min_request_count'}
+    folder_name = res_map.get(resolution)
+    if not folder_name: return None
+    
+    # Path mapping
+    if model_name == "LSTM":
+        path = os.path.join("models", "result_lstm", folder_name, "LSTM", "predictions.csv")
+    elif model_name == "Prophet":
+        path = os.path.join("models", "results_prophet", folder_name, "predictions.csv")
+    elif model_name == "Hybrid":
+        path = os.path.join("models", "results_hybrid", folder_name, "hybrid_predictions.csv")
+    elif model_name == "ARIMA":
+        path = os.path.join("models", "results_arima", folder_name, "predictions.csv")
+    else:
+        return None
+    
+    possible_roots = ["", "../", "../../"]
+    
+    for root in possible_roots:
+        full_path = os.path.join(root, path)
+        if os.path.exists(full_path):
+            try:
+                df = pd.read_csv(full_path)
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                
+                # Rename columns to standard format
+                if 'actual' in df.columns:
+                    df.rename(columns={'actual': 'requests'}, inplace=True)
+                
+                if 'predicted' in df.columns:
+                    df.rename(columns={'predicted': 'forecast'}, inplace=True)
+                elif 'hybrid_pred' in df.columns:
+                    df.rename(columns={'hybrid_pred': 'forecast'}, inplace=True)
+                elif 'yhat' in df.columns:  # Prophet format
+                    df.rename(columns={'ds': 'timestamp', 'y': 'requests', 'yhat': 'forecast'}, inplace=True)
+                
+                return df
+            except Exception:
+                continue
+    return None
+
+def get_workload_status(current_load: int, active_replicas: int, forecast: int):
+    """Classifies workload into 4 tiers based on capacity utilization."""
+    capacity = active_replicas * config.DEFAULT_SCALE_OUT_THRESHOLD
+    if capacity == 0:
+        return "CRITICAL", "#ff2e63", "🔥"
+    
+    utilization = (current_load / capacity) * 100
+    
+    # Check for spike (actual >> forecast)
+    if forecast > 0:
+        spike_ratio = current_load / forecast
+        if spike_ratio > 1.5:  # 50% higher than forecast
+            return "SPIKE", "#ff2e63", "⚡"
+    
+    # Normal classification
+    if utilization < 40:
+        return "LOW", "#00ff88", "📉"
+    elif utilization < 80:
+        return "NORMAL", "#00e5ff", "✅"
+    elif utilization < 110:
+        return "HIGH", "#ffd60a", "📈"
+    else:
+        return "CRITICAL", "#ff2e63", "🔥"
 
 def render_server_grid(active_replicas: int, max_replicas: int = 12):
     """Generates HTML for the visual server grid."""
@@ -220,22 +313,6 @@ def render_server_grid(active_replicas: int, max_replicas: int = 12):
     
     return f'<div class="server-grid">{"".join(cards)}</div>'
 
-def get_workload_status(current_load, active_replicas):
-    """Classifies workload into Low/Normal/High/Spike based on system capacity."""
-    capacity = active_replicas * config.DEFAULT_SCALE_OUT_THRESHOLD
-    if capacity == 0: return "SPIKE", "#ff0000", "🔥" # Avoid div by zero
-    
-    utilization = (current_load / capacity) * 100
-    
-    if utilization < 40:
-        return "LOW", "#00e5ff", "💤"
-    elif utilization < 80:
-        return "NORMAL", "#39ff14", "✅"
-    elif utilization < 110:
-        return "HIGH", "#ffb300", "⚠️"
-    else:
-        return "SPIKE", "#ff3b5c", "🔥"
-
 # ──────────────────────────────────────────────
 # 3.  APP LOGIC
 # ──────────────────────────────────────────────
@@ -247,7 +324,20 @@ with st.sidebar:
     
     simulation_speed = st.slider("Cycle Duration (s)", 0.1, 2.0, config.SIMULATION_SPEED_DEFAULT)
     resolution = st.selectbox("Resolution", ["1m", "5m", "15m"], index=0)
-    model_type = st.selectbox("AI Model", ["LSTM (Pre-calculated)", "Prophet (Pre-calculated)", "LSTM (Live)", "ARIMA", "Prophet"], index=0)
+    
+    # Model Selection (All Pre-calculated)
+    st.markdown("### 🤖 AI Forecasting Model")
+    model_type = st.selectbox(
+        "Select Model",
+        ["LSTM", "Prophet", "Hybrid", "ARIMA"],
+        index=2, # Default to Hybrid (best)
+        help="""
+        **Hybrid**: LSTM + Prophet (Best Accuracy)
+        **LSTM**: Deep Learning (Good for short-term)
+        **Prophet**: Facebook's TS Model (Good for seasonality)
+        """
+    )
+    
     is_running = st.checkbox("▶  ACTIVATE SYSTEM", value=True)
     
     st.markdown("---")
@@ -259,52 +349,54 @@ with st.sidebar:
 if 'history' not in st.session_state:
     st.session_state.history = {'timestamp': [], 'requests': [], 'replicas': [], 'forecast': []}
 
-# Load Data logic (Res/Simulator update)
-# We check if resolution changed OR model type changed (if switching between different pre-calc sources)
-# Actually, different pre-calc models imply different DATA SOURCES (df).
-if 'resolution' not in st.session_state or st.session_state.resolution != resolution or \
-   'model_type' not in st.session_state or st.session_state.model_type != model_type or \
-   'simulator' not in st.session_state:
+# Data Loading (Always Pre-calculated)
+if ('resolution' not in st.session_state or 
+    st.session_state.resolution != resolution or 
+    'model_type' not in st.session_state or 
+    st.session_state.model_type != model_type or 
+    'simulator' not in st.session_state):
     
-    st.session_state.resolution = resolution
-    st.session_state.model_type = model_type
-    
-    df = None
-    if model_type == "LSTM (Pre-calculated)":
-        df = load_hybrid_data(resolution) # This loads LSTM/Hybrid logic
-        if df is not None: st.toast(f"LSTM Data Loaded: {resolution}", icon="✅")
-    elif model_type == "Prophet (Pre-calculated)":
-        df = load_prophet_data(resolution)
-        if df is not None: st.toast(f"Prophet Data Loaded: {resolution}", icon="✅")
+    with st.spinner(f'🔄 Loading {model_type} predictions...'):
+        st.session_state.resolution = resolution
+        st.session_state.model_type = model_type
         
-    if df is None:
-        # Fallback to Raw Data if not pre-calc, or if pre-calc failed
-        df = load_raw_data(resolution)
+        # Hybrid only supports 5m/15m -> Fallback to LSTM for 1m
+        target_model = model_type
+        if model_type == "Hybrid" and resolution == "1m":
+            st.warning("⚠️ Hybrid model available for 5m/15m only. Showing LSTM for 1m.")
+            target_model = "LSTM"
+        
+        # Load pre-calculated predictions
+        df = load_model_predictions(target_model, resolution)
+        
         if df is not None:
-            st.toast(f"Raw Data Loaded: {resolution}", icon="📂")
+            st.toast(f"✅ {model_type} Predictions Loaded: {resolution}", icon="📈")
         else:
-            st.warning("No data found, using synthetic.")
+            st.warning(f"⚠️ {model_type} predictions not found, using synthetic data")
             dates = pd.date_range(start='2024-01-01', periods=1000, freq=resolution.replace('m', 'min'))
             reqs = 1000 + 500 * np.sin(np.arange(1000)/20) + np.random.normal(0, 50, 1000)
-            df = pd.DataFrame({'timestamp': dates, 'requests': list(map(int, reqs))})
-    
-    st.session_state.simulator = TimeTraveler(df)
-    st.session_state.history = {'timestamp': [], 'requests': [], 'replicas': [], 'forecast': []}
+            forecasts = reqs + np.random.normal(0, 30, 1000)
+            df = pd.DataFrame({
+                'timestamp': dates, 
+                'requests': list(map(int, reqs)),
+                'forecast': list(map(int, forecasts))
+            })
+        
+        st.session_state.simulator = TimeTraveler(df)
+        st.session_state.history = {
+            'timestamp': [], 
+            'requests': [], 
+            'replicas': [], 
+            'forecast': []
+        }
 
 if 'autoscaler' not in st.session_state:
     st.session_state.autoscaler = Autoscaler(min_servers=min_replicas, max_servers=max_replicas)
 
-# Load Models (Lazy) - Only for Live models
-is_precalc = "Pre-calculated" in model_type
-if not is_precalc and 'models' not in st.session_state:
-    with st.spinner("Loading AI Models..."):
-        loader = ModelLoader(config.MODEL_DIR)
-        st.session_state.models = {
-            'lstm': loader.load_keras_model("lstm_model.h5"),
-            'arima': loader.load_generic_model("arima_model.pkl"),
-            'prophet': loader.load_generic_model("prophet_model.pkl")
-        }
-        st.session_state.scaler = loader.load_scaler("scaler.pkl")
+if 'anomaly_detector' not in st.session_state:
+    st.session_state.anomaly_detector = AnomalyDetector(window_size=30)
+
+# No model loading needed - all predictions are pre-calculated
 
 # Layout
 st.markdown("## ⚡ PLANORA MISSION CONTROL")
@@ -326,24 +418,16 @@ def update():
     curr_req = data.get('requests', 0)
     curr_time = data.get('timestamp', pd.Timestamp.now())
     
-    # Forecast
-    if "Pre-calculated" in model_type:
-        fcast = data.get('forecast', curr_req)
-    else:
-        # Inference Logic
-        if 'predictor' not in st.session_state or st.session_state.get('pred_type') != model_type:
-            st.session_state.predictor = PredictorFactory.get_predictor(model_type, st.session_state.models, st.session_state.scaler)
-            st.session_state.pred_type = model_type
-        
-        recent = hist['requests'][-30:] + [curr_req]
-        if len(recent) < 30: recent = [curr_req]*30
-        fcast = st.session_state.predictor.predict(recent)[0]
+    # Forecast Logic (All Pre-calculated)
+    fcast = data.get('forecast', curr_req)
 
     # Scaling
     # Get last replicas or initial config
     current_replicas = hist['replicas'][-1] if hist['replicas'] else config.INITIAL_REPLICAS
     replicas, reason, cost, details = st.session_state.autoscaler.calculate_replicas(curr_req, fcast, current_replicas)
-    anomaly = AnomalyDetector().detect(curr_req, fcast)
+    
+    # Anomaly Detection (Statistical Z-Score)
+    anomaly = st.session_state.anomaly_detector.detect(curr_req, fcast)
     
     # Update History
     hist['timestamp'].append(curr_time)
@@ -356,17 +440,25 @@ def update():
         
     # UI Render
     # Calculate Workload Status
-    wl_status, wl_color, wl_icon = get_workload_status(curr_req, replicas)
+    # Get workload classification and anomaly status
+    wl_status, wl_color, wl_icon = get_workload_status(curr_req, replicas, fcast)
     
     with col1:
-        st.metric("REAL-TIME TRAFFIC", f"{int(curr_req)}", f"{wl_icon} {wl_status}")
+        delta_req = curr_req - hist['requests'][-2] if len(hist['requests']) > 1 else 0
+        st.metric("🌊 TRAFFIC", f"{int(curr_req):,}", f"{delta_req:+.0f}")
+    
     with col2:
-        st.metric("AI FORECAST", f"{int(fcast)}", delta_color="off")
+        delta_fcast = fcast - curr_req
+        st.metric("🔮 FORECAST", f"{int(fcast):,}", f"{delta_fcast:+.0f}", delta_color="off")
+    
     with col3:
-        # Display Active Nodes with simplified reason
-        st.metric("ACTIVE NODES", f"{replicas}", f"{details['action']}")
+        delta_replicas = replicas - current_replicas
+        st.metric("🖥️ NODES", f"{replicas}", f"{delta_replicas:+d}" if delta_replicas != 0 else None)
+    
     with col4:
-        st.metric("SYSTEM HEALTH", anomaly, delta="OK" if anomaly=="Normal" else "CRT", delta_color="inverse")
+        # Show workload status with color
+        anomaly_icon = "🚨" if anomaly != "NORMAL" else "✅"
+        st.metric(f"{wl_icon} WORKLOAD", wl_status, f"{anomaly_icon} {anomaly}")
         
     # ──────────────────────────────────────────────
     # DECISION INTELLIGENCE PANEL
@@ -399,8 +491,31 @@ def update():
     with placeholder_charts.container():
         # Row 1: Main Chart
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist['timestamp'], y=hist['requests'], name='Actual', line=dict(color='#00e5ff', width=2), fill='tozeroy', fillcolor='rgba(0, 229, 255, 0.1)'))
-        fig.add_trace(go.Scatter(x=hist['timestamp'], y=hist['forecast'], name='Forecast', line=dict(color='#ffb300', dash='dash', width=2)))
+        
+        # Actual uses current timestamps
+        fig.add_trace(go.Scatter(
+            x=hist['timestamp'], 
+            y=hist['requests'], 
+            name='Actual', 
+            line=dict(color='#00e5ff', width=2), 
+            fill='tozeroy', 
+            fillcolor='rgba(0, 229, 255, 0.1)'
+        ))
+        
+        # Forecast: Shift timestamps FORWARD by 1 interval (shows future prediction)
+        # Calculate interval from resolution
+        interval_map = {'1m': pd.Timedelta(minutes=1), '5m': pd.Timedelta(minutes=5), '15m': pd.Timedelta(minutes=15)}
+        interval = interval_map.get(resolution, pd.Timedelta(minutes=1))
+        
+        # Shift forecast timestamps forward
+        forecast_timestamps = [t + interval for t in hist['timestamp']]
+        
+        fig.add_trace(go.Scatter(
+            x=forecast_timestamps,  # FUTURE timestamps
+            y=hist['forecast'], 
+            name='Forecast', 
+            line=dict(color='#ffb300', dash='dash', width=2)
+        ))
         fig.update_layout(
             title="TRAFFIC LOAD VS PREDICTION",
             template="plotly_dark",
@@ -409,7 +524,7 @@ def update():
             height=350,
             margin=dict(l=20, r=20, t=40, b=20)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
         # Row 2: Server Grid + Residuals
         c_grid, c_res = st.columns([1, 1])
@@ -428,7 +543,7 @@ def update():
                 height=250,
                 margin=dict(l=20, r=20, t=40, b=20)
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
 
 if is_running:
     update()
